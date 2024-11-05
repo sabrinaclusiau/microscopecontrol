@@ -1,1 +1,114 @@
+from PIL import Image
+import time
+import logging
+import os
+import shutil
+from internalProject.microscopeControl.abstract_external_communication import AbstractExternalCommunication
+
+
+"""
+Command format
+    separation is one space only - two spaces causes error
+    separate data with comma ,
+    
+Abstract class is not specific to command format, this class is.
+"""
+class Su8230ExternalCommunication(AbstractExternalCommunication):
+    SEM_unit_ID = '0300'
+    EXT_unit_ID = '0303'
+    status_code = '0000'
+
+    def __init__(self):
+        super().__init__()
+
+    def im_transfer(self, project_name, newFileName):
+        save_dir = project_name
+        if not os.path.isdir(save_dir):
+            os.makedirs(save_dir)
+
+        ext = ['.txt', '.bmp']
+        imagesToCopy = [x for x in os.listdir(self.pc_sem_dir_temp) if os.path.splitext(x)[-1] in ext]
+        imagesToCopy = [x for x in imagesToCopy if 'C_Image_' in x]
+        # copy images to save folder
+        for file in imagesToCopy:
+            filepath = os.path.join(self.pc_sem_dir_temp, file)
+            shutil.copy(filepath, save_dir)
+
+        # change image names
+        srcname = ''
+        n = 0
+        for file in imagesToCopy:
+            # convert to tiff file instead of bmp
+            if os.path.splitext(file)[-1] == '.bmp':
+                img = Image.open(save_dir + file).convert('RGB')
+                srcname = file.split('.')[0]
+                file = f'{save_dir}{srcname}.tiff'
+                img.save(f'{file}', format='TIFF', compression='tiff_lzw')
+                # delete .bmp file
+                os.remove(f'{save_dir}{srcname}.bmp')
+                n += 1
+
+            imageName = f'{newFileName}_{n}'
+            # rename file
+            ext = os.path.splitext(file)[-1]
+            destpath = f'{imageName}{ext}'
+            srcpath = f'{srcname}{ext}'
+            os.rename(os.path.join(save_dir, srcpath), os.path.join(save_dir, destpath))
+
+        return save_dir
+
+    @classmethod
+    def send_text_command(cls, connection, send_command_string, log=True):
+        # Sending text format
+        # (Send unit ID)(Receive unit ID)(Status code)(Main code)(Sub code)(Ext code)(Data)(EOF(CR)(LF))
+        command_message = f'{cls.SEM_unit_ID} {cls.EXT_unit_ID} {cls.status_code} {send_command_string}\r\n'
+        command_byte = command_message.encode('UTF-8')
+        data = connection.send(command_byte)
+        if log:
+            logging.info(f"Sent command : {command_message}")
+
+    @classmethod
+    def receive_text_command(cls, connection, log=True):
+        # Receiving text format
+        # (Receive unit ID)(Send unit ID)(Status code)(Main code)(Sub code)(Ext code)(Data)(EOF(CR)(LF))
+        # example = f'{cls.SEM_unit_ID} {cls.EXT_unit_ID} {cls.status_code} Set FOCUS ALL 1200,2047 OK (CR)(LF)'
+        command_byte = connection.recv(cls.BUFF_SIZE)
+        dictDecodedMessage = {}
+        command = command_byte.decode('UTF-8')
+        if log:
+            logging.info(f"Received command : {command}")
+
+        items = command.split()
+        dictDecodedMessage['receive_id'] = str(items[0])
+        dictDecodedMessage['send_id'] = str(items[1])
+        dictDecodedMessage['status_code'] = str(items[2])
+        dictDecodedMessage['main_code'] = str(items[3])
+        dictDecodedMessage['sub_code'] = str(items[4])
+        dictDecodedMessage['ext_code'] = str(items[5])
+        dictDecodedMessage['data'] = str(items[6])
+        dictDecodedMessage['return_status'] = str(items[7])
+        return dictDecodedMessage
+
+    def wait_command_complete(self):
+        logging.info('Waiting for command to finish ...')
+        current_status = ''
+        while current_status != 'IDLE':
+            time.sleep(0.5)
+            # Send a get command to see if microscope is still processing
+            self.send_command(send_command_string='Get InstructName ALL', log=False)
+            dictReceivedMessage = self.receive_command(log=False)
+            current_status = dictReceivedMessage['return_status']
+            logging.info(current_status)
+        return True
+
+    @classmethod
+    def validate_return_status(cls, dictDecodedMessage):
+        # Validate that return status is OK
+        if dictDecodedMessage['return_status'] == 'OK':
+            logging.info('Successfully set ' + dictDecodedMessage['sub_code'] + ' to ' + dictDecodedMessage['data'])
+        elif dictDecodedMessage['return_status'] == 'NG':
+            logging.info('Unable to execute sent command')
+        elif dictDecodedMessage['return_status'] == 'PARAMERROR':
+            logging.info('Set value in command text is not correct (not defined, out of range, etc.)')
+
 
